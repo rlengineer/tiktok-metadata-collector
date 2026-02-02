@@ -8,7 +8,6 @@ A sandbox for collecting tiktok metadata
 - Errors are logged, not fatal
 - Slow > blocked
 
-
 ## Folder structure
 ```
 tiktok-metadata-collector/
@@ -39,18 +38,20 @@ tiktok-metadata-collector/
 │   │   │
 │   │   └── 2026-02-15/
 │   │       └── tiktok_seed_users_20260215_090212.json
+├   ├── enriched/
+│   │   ├── 2026-02-01/
+│   │       ├── tiktok_seed_users_20260201_214501.json
+│   │       └── tiktok_seed_users_20260201_221833.json
 │   │
 │   └── README.md
 │
 ├── notebooks/
 │   └── explore_seed_outputs.ipynb
-│
-└── logs/
-    └── runs.log
 ```
 
+# TikTok User Metadata Collector
 
-## How to Run the TikTok User Metadata Collector
+## How to run the collector
 
 This guide documents the **repeatable workflow** for:
 - updating seed files
@@ -144,4 +145,37 @@ Slow the crawl:
 ###  7) Deactivate when finished
 ```bash
 deactivate
+```
+
+# TikTok Video Metadata Collector
+
+## How to run the collector
+The script does the following:
+- reads JSON file output by the user metadata collector script
+- extracts all video URLs from the JSON
+- calls yt-dlp per video to get richer metadata (-J --no-download)
+- attempts comments with --write-comments
+- outputs the results in JSON
+
+### 1) Activate venv
+```bash
+source venv/bin/activate
+```
+
+### 2) Optional but recommended 
+```bash
+pip install -U "yt-dlp[default,curl-cffi]"
+```
+
+### 3) Run the script
+Fill in the correct file names and run:
+
+```bash
+mkdir -p outputs/enriched/2026-02-01
+python src/collect_video_metadata_from_ids.py \
+  --input outputs/raw/2026-02-01/tiktok_seed_users_20260201_223844.json \
+  --out outputs/enriched/2026-02-01 \
+  --write-per-video \
+  --sleep 4 --jitter 3
+  --max-consecutive-errors 5
 ```
