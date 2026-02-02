@@ -3,29 +3,30 @@
 enriched_videos_to_csv.py
 
 Supports:
-1) "batch" enriched JSON:
-   { run_started_at, ..., results: [ {video_id, url, username, scraped_at, yt_dlp:{...}}, ... ] }
+1) Batch enriched JSON:
+   { run_started_at, ..., results: [ {...}, ... ] }
 
-2) "single video" JSON:
+2) Single-video JSON files:
    { video_id, url, username, scraped_at, yt_dlp:{...} }
 
-Outputs:
-  - videos_enriched.csv  (one row per video)
+Output:
+  - videos_enriched_<timestamp>.csv
 
-Design choice:
-- We do NOT fully flatten yt_dlp.formats (huge list).
-- We extract "core" yt_dlp fields + a few helpful summaries.
+Timestamp priority:
+1) run_started_at (batch)
+2) earliest scraped_at (folder mode)
+3) current time
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
-
 
 def read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
@@ -37,29 +38,32 @@ def iter_inputs(path: Path) -> List[Path]:
     return [path]
 
 
+def parse_iso_dt(s: Optional[str]) -> Optional[datetime]:
+    if not s or not isinstance(s, str):
+        return None
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
 def pick_best_format(formats: Any) -> Dict[str, Any]:
-    """
-    Pick a "best" format summary from yt_dlp.formats.
-    Heuristic: choose the format with highest height, then highest tbr/filesize.
-    """
     if not isinstance(formats, list) or not formats:
         return {}
 
     def score(fmt: Dict[str, Any]) -> Tuple[int, float, int]:
-        h = fmt.get("height") or 0
-        tbr = fmt.get("tbr") or 0.0
-        fs = fmt.get("filesize") or fmt.get("filesize_approx") or 0
-        return (int(h), float(tbr), int(fs))
+        return (
+            int(fmt.get("height") or 0),
+            float(fmt.get("tbr") or 0.0),
+            int(fmt.get("filesize") or fmt.get("filesize_approx") or 0),
+        )
 
-    best = None
-    best_s = (-1, -1.0, -1)
+    best, best_s = None, (-1, -1.0, -1)
     for f in formats:
         if not isinstance(f, dict):
             continue
         s = score(f)
         if s > best_s:
-            best_s = s
-            best = f
+            best_s, best = s, f
 
     if not isinstance(best, dict):
         return {}
@@ -77,12 +81,8 @@ def pick_best_format(formats: Any) -> Dict[str, Any]:
 
 
 def first_thumbnail(thumbnails: Any) -> Dict[str, Any]:
-    """
-    Extract a couple useful thumbnail URLs without exploding the list.
-    """
     if not isinstance(thumbnails, list) or not thumbnails:
         return {}
-    # Prefer "cover" or "originCover" if present, else first
     preferred = {t.get("id"): t for t in thumbnails if isinstance(t, dict)}
     cover = preferred.get("cover") or preferred.get("originCover") or preferred.get("dynamicCover")
     if isinstance(cover, dict):
@@ -93,9 +93,6 @@ def first_thumbnail(thumbnails: Any) -> Dict[str, Any]:
 
 def normalize_record(item: Dict[str, Any], run_meta: Dict[str, Any]) -> Dict[str, Any]:
     yt = item.get("yt_dlp") if isinstance(item.get("yt_dlp"), dict) else {}
-
-    formats_summary = pick_best_format(yt.get("formats"))
-    thumb_summary = first_thumbnail(yt.get("thumbnails"))
 
     artists = yt.get("artists")
     artists_str = ",".join(artists) if isinstance(artists, list) else None
@@ -124,43 +121,46 @@ def normalize_record(item: Dict[str, Any], run_meta: Dict[str, Any]) -> Dict[str
         "channel_id": yt.get("channel_id"),
         "uploader": yt.get("uploader"),
         "uploader_id": yt.get("uploader_id"),
-        "uploader_url": yt.get("uploader_url"),
-        "channel_url": yt.get("channel_url"),
 
         # Audio/music
         "track": yt.get("track"),
         "album": yt.get("album"),
         "artists": artists_str,
 
-        # Quick summaries from big lists
-        **formats_summary,
-        **thumb_summary,
+        # Summaries from large lists
+        **pick_best_format(yt.get("formats")),
+        **first_thumbnail(yt.get("thumbnails")),
 
-        # Useful URL fields
+        # URLs
         "webpage_url": yt.get("webpage_url"),
         "original_url": yt.get("original_url"),
         "extractor": yt.get("extractor"),
         "extractor_key": yt.get("extractor_key"),
     }
 
-
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--in", dest="in_path", required=True, help="Input JSON file OR folder of JSONs")
-    ap.add_argument("--out", dest="out_csv", required=True, help="Output CSV path")
+    ap.add_argument("--in", dest="in_path", required=True, help="Input JSON file OR folder")
+    ap.add_argument("--out", dest="out_dir", required=True, help="Output directory")
+    ap.add_argument("--prefix", default="videos_enriched", help="Filename prefix")
     args = ap.parse_args()
 
     in_path = Path(args.in_path).expanduser().resolve()
-    out_csv = Path(args.out_csv).expanduser().resolve()
-    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    out_dir = Path(args.out_dir).expanduser().resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     rows: List[Dict[str, Any]] = []
+    candidate_times: List[datetime] = []
 
     for fp in iter_inputs(in_path):
         data = read_json(fp)
 
-        # Determine if it's batch or single
+        # Batch file
         if isinstance(data, dict) and isinstance(data.get("results"), list):
+            dt = parse_iso_dt(data.get("run_started_at"))
+            if dt:
+                candidate_times.append(dt)
+
             run_meta = {
                 "run_started_at": data.get("run_started_at"),
                 "source_input": data.get("source_input"),
@@ -170,19 +170,34 @@ def main():
                 "attempted_comments": data.get("attempted_comments"),
                 "skipped_existing": data.get("skipped_existing"),
             }
+
             for item in data["results"]:
                 if isinstance(item, dict):
                     rows.append(normalize_record(item, run_meta))
+
+        # Single-video file
         elif isinstance(data, dict):
-            # single video json file
-            run_meta = {"source_file": str(fp)}
-            rows.append(normalize_record(data, run_meta))
-        else:
-            # not recognized
-            continue
+            dt = parse_iso_dt(data.get("scraped_at"))
+            if dt:
+                candidate_times.append(dt)
+
+            rows.append(
+                normalize_record(
+                    data,
+                    {"source_file": fp.name},
+                )
+            )
 
     df = pd.DataFrame(rows)
+
+    if not candidate_times:
+        ts = datetime.now()
+    else:
+        ts = min(candidate_times)
+
+    out_csv = out_dir / f"{args.prefix}_{ts.strftime('%Y%m%d_%H%M%S')}.csv"
     df.to_csv(out_csv, index=False)
+
     print(f"Wrote {out_csv} (rows={len(df):,}, cols={df.shape[1]:,})")
 
 

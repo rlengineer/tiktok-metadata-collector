@@ -198,20 +198,20 @@ pip install pandas
 To run user_metadata_to_csv.py
 ```bash
 python user_metadata_to_csv.py \
-  --in ../outputs/raw/2026-02-01/tiktok_seed_users_20260201_223844.json \
-  --out ../outputs/csv_out
+  --in ../outputs/raw/2026-02-01/tiktok_seed_users_20260201_221220.json \
+  --out ../outputs/csv_out/user_data
 ```
 
 To run video_metadata_to_csv.py on batch-style files:
 ```bash
-python enriched_videos_to_csv.py \
-  --in /mnt/data/videos_enriched_20260202_133449.json \
-  --out ./csv_out/videos_enriched.csv
+python video_metadata_to_csv.py \
+  --in ../outputs/enriched/2026-02-01/videos_enriched_20260202_133449.json \
+  --out ../outputs/csv_out/video_data
 ```
 
 To run video_metadata_to_csv.py on a folder of per-video JSONs::
 ```bash
-python enriched_videos_to_csv.py \
-  --in ./outputs/enriched/per_video_jsons \
-  --out ./csv_out/videos_enriched.csv
+python video_metadata_to_csv.py \
+  --in ../outputs/enriched/2026-02-01/per_video \
+  --out ../outputs/csv_out/video_data
 ```
