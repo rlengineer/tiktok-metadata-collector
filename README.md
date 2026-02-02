@@ -1,7 +1,5 @@
 # tiktok-metadata-collector/
-A sandbox for tiktok scraping
-
-## Repo Folder Structure
+A sandbox for collecting tiktok metadata
 
 ```
 tiktok-metadata-collector/
