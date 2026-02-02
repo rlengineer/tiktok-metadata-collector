@@ -1,12 +1,20 @@
 # tiktok-metadata-collector/
-A sandbox for collecting tiktok metadata
+A slow-and-strady approach to collecting tiktok metadata
 
 ## Core principles
-- Seeds are immutable snapshots
 - One JSON output per run
-- Outputs always reference the seed file used
 - Errors are logged, not fatal
 - Slow > blocked
+
+## General flow
+- Create a seed file
+- - Stored as .txt
+- - One username per row
+- - Save in seeds/yyyy-mm-dd
+- Run collect_user_metadata.py
+- - Saves the output from the run (metadata for each user) as json in outputs/raw/YYYY-MM-DD
+- Run collect_video_metadata_from_ids.py
+- - Saves the output from the run (metadata for each video) as json in outputs/enriched/YYYY-MM-DD
 
 ## Folder structure
 ```
@@ -171,11 +179,12 @@ pip install -U "yt-dlp[default,curl-cffi]"
 Fill in the correct file names and run:
 
 ```bash
-mkdir -p outputs/enriched/2026-02-01
-python src/collect_video_metadata_from_ids.py \
-  --input outputs/raw/2026-02-01/tiktok_seed_users_20260201_223844.json \
-  --out outputs/enriched/2026-02-01 \
+python collect_video_metadata_from_ids.py \
+  --input ../outputs/raw/2026-02-01/tiktok_seed_users_20260201_223844.json \
+  --out ../outputs/enriched/2026-02-01 \
   --write-per-video \
-  --sleep 4 --jitter 3
-  --max-consecutive-errors 5
+  --no-comments \
+  --sleep 6.0 --jitter 3.0 \
+  --max-total-errors 20
 ```
+Note - sleep 6.0 and jitter 3.0 runs about 215/hour, no ERRORs
