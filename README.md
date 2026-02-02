@@ -1,6 +1,13 @@
 # tiktok-metadata-collector/
 A sandbox for collecting tiktok metadata
 
+## Core principles
+- Seeds are immutable snapshots
+- One JSON output per run
+- Outputs always reference the seed file used
+- Errors are logged, not fatal
+- Slow > blocked
+
 ## Folder structure
 ```
 tiktok-metadata-collector/
@@ -136,10 +143,3 @@ Slow the crawl:
 ```bash
 deactivate
 ```
-
-## Core principles
-- Seeds are immutable snapshots
-- One JSON output per run
-- Outputs always reference the seed file used
-- Errors are logged, not fatal
-- Slow > blocked
