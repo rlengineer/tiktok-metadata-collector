@@ -1,6 +1,7 @@
 # tiktok-metadata-collector/
 A sandbox for collecting tiktok metadata
 
+## Folder structure
 ```
 tiktok-metadata-collector/
 │
