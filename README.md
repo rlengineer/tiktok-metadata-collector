@@ -190,17 +190,20 @@ python collect_video_metadata_from_ids.py \
 Note - sleep 6.0 and jitter 3.0 runs about 215/hour, no ERRORs
 
 # JSON to CSV conversion scripts
-To run user_metadata_to_csv.py
+First:
 ```bash
 pip install pandas
-python seed_users_to_csv.py \
-  --in /mnt/data/tiktok_seed_users_20260201_223844.json \
-  --out ./csv_out
+```
+
+To run user_metadata_to_csv.py
+```bash
+python user_metadata_to_csv.py \
+  --in ../outputs/raw/2026-02-01/tiktok_seed_users_20260201_223844.json \
+  --out ../outputs/csv_out
 ```
 
 To run video_metadata_to_csv.py on batch-style files:
 ```bash
-pip install pandas
 python enriched_videos_to_csv.py \
   --in /mnt/data/videos_enriched_20260202_133449.json \
   --out ./csv_out/videos_enriched.csv
