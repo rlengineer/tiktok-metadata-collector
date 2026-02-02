@@ -1,6 +1,8 @@
 # tiktok-metadata-collector/
 A slow-and-strady approach to collecting tiktok metadata
 
+Tech: Python, mongoDB
+
 ## Core principles
 - One JSON output per run
 - Errors are logged, not fatal
