@@ -3,8 +3,8 @@
 video_metadata_to_csv.py
 
 Purpose:
-Converts video metadata from JSON to CSV format (to reduce storage space)
-Specifically designed to process the ouput from src/collect_video_metadata_from_ids.py
+- Converts video metadata from JSON to CSV format (to reduce storage space)
+- Specifically designed to process the ouput from src/collect_video_metadata_from_ids.py
 
 Supports:
 1) Batch enriched JSON:

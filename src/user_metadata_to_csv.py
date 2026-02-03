@@ -3,8 +3,8 @@
 user_metadata_to_csv.py
 
 Purpose:
-Converts user metadata from JSON to CSV format (to reduce storage space)
-Specifically designed to process the ouput from src/collect_user_metadata.py
+- Converts user metadata from JSON to CSV format (to reduce storage space)
+- Specifically designed to process the ouput from src/collect_user_metadata.py
 
 Input:  
 ../outputs/raw/yyyy-mm-dd/tiktok_seed_users_***_***.json

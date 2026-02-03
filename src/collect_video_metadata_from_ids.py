@@ -7,35 +7,29 @@ Purpose:
 - Tiktok comments: Can attempt comment extraction via --write-comments, but this often leads to ERROR (functionality can be turned on and off)
 - Reruns: If running on an input produces a partial output (i.e., if you stop early due to multiple ERRORS), the script will skip video IDs that it has already aprsed metadata for, as long as you are in the same folder.
 - ERROR support: To handle bot dection, by default, the script stops running after 5 consecutive ERRORS. This is a parameter that can be modified, or set to 0 to be disabled (not recommended). 
-
-
-
+s
 Outputs:
 - One combined JSON: <out_dir>/videos_enriched_<timestamp>.json
 - Optionally per-video JSON files: <out_dir>/per_video/<video_id>.json
 
 Command line examples:
   python collect_video_metadata_from_ids.py \
-    --input outputs/raw/2026-02-01/tiktok_seed_users_20260201_214501.json \
-    --out outputs/enriched/2026-02-01 \
+    --input ../outputs/raw/2026-02-01/tiktok_seed_users_20260201_214501.json \
+    --out ../outputs/enriched/2026-02-01 \
     --sleep 2.0 --jitter 1.5 \
     --write-per-video
 
   # Resume (default behavior if per_video exists):
   python collect_video_metadata_from_ids.py \
-    --input outputs/raw/2026-02-01/tiktok_seed_users_20260201_214501.json \
-    --out outputs/enriched/2026-02-01 \
+    --input ../outputs/raw/2026-02-01/tiktok_seed_users_20260201_214501.json \
+    --out ../outputs/enriched/2026-02-01 \
     --write-per-video
 
-  # Disable comment extraction (often improves stability):
+  # Disable comment extraction:
   python collect_video_metadata_from_ids.py \
-    --input outputs/raw/...json --out outputs/enriched/... \
+    --input ../outputs/raw/...json --out outputs/enriched/... \
     --write-per-video --no-comments
 
-  # Override stop-early thresholds:
-  python collect_video_metadata_from_ids.py \
-    --input ...json --out ... \
-    --max-consecutive-errors 10 --max-total-errors 50
 """
 
 import argparse
