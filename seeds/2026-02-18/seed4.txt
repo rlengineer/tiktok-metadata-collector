@@ -1,0 +1,6 @@
+hotelsdotcom
+trivago
+skyscanner
+hopper
+viator
+getyourguide
