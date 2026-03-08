@@ -1,0 +1,741 @@
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Install libraries
+
+```{r}
+suppressPackageStartupMessages({
+  library(DBI)
+  library(RPostgres)
+  library(dplyr)
+  library(stringr)
+  library(purrr)
+  library(tidyr)
+  library(jsonlite)
+  library(stringi)
+  library(readr)
+  library(tibble)
+})
+
+```
+
+
+# Get tiktok data from postgres
+
+```{r}
+# connect to postgres
+con <- dbConnect(
+  RPostgres::Postgres(),
+  host = Sys.getenv("DB_HOST"),
+  port = as.integer(Sys.getenv("DB_PORT", "5432")),
+  dbname = Sys.getenv("DB_NAME"),
+  user = Sys.getenv("DB_USER"),
+  password = Sys.getenv("DB_PASS"),
+  sslmode = "require"
+)
+
+# read in data
+tiktok <- dbGetQuery(con, "SELECT * FROM clean_data.tik_tok")
+
+```
+
+# Helper functions to normalize text columns
+
+```{r}
+normalize_text <- function(x) {
+  x <- dplyr::coalesce(as.character(x), "")
+  x <- iconv(x, to = "UTF-8", sub = "")
+  x <- stringi::stri_trans_general(x, "Latin-ASCII")
+  x <- tolower(x)
+  x <- str_replace_all(x, "[|,/;]+", " ")
+  x <- str_replace_all(x, "#", " ")
+  x <- str_replace_all(x, "@", " ")
+  x <- str_replace_all(x, "[^a-z0-9 ]+", " ")
+  x <- str_squish(x)
+  x
+}
+
+normalize_compact <- function(x) {
+  x <- normalize_text(x)
+  str_replace_all(x, "\\s+", "")
+}
+
+clean_code <- function(x) {
+  x <- as.character(x)
+  x <- str_trim(x)
+  x[x %in% c("", "\\N", "-", "N/A", "NA", "NULL", "null")] <- NA_character_
+  x
+}
+```
+
+# Blacklist / glue words
+
+```{r}
+bad_single_word_terms <- c(
+  "nice", "reading", "allen", "tours", "lot", "can", "for", "hear",
+  "same", "man", "part", "make", "date", "side", "tour", "travel",
+  "terminal", "flight", "flights", "airport", "airline", "airlines",
+  "airways", "city", "holiday", "vacation", "adventure", "sale",
+  "surprise", "forest", "bend", "most", "normal", "guide", "hotel", "taylor"
+)
+
+glue_words <- c(
+  "travel", "tourism", "tourist", "trip", "trips", "vacation", "vacations",
+  "holiday", "holidays", "visit", "visiting", "guide", "guides",
+  "adventure", "adventures", "explore", "exploring", "destination",
+  "destinations", "getaway", "getaways", "journey", "journeys",
+  "life", "food", "style", "crew", "sunset", "sunsets", "beauty",
+  "beach", "summer", "winter", "check", "vibes", "living", "love",
+  "diaries", "tips", "itinerary", "resort", "hotel"
+)
+
+glue_words <- unique(normalize_compact(glue_words))
+```
+
+# File readers
+
+## alternate cities & us geo ref file
+
+```{r}
+
+read_alternate_names <- function(path) {
+  readr::read_tsv(
+    path,
+    col_names = c(
+      "alternateNameId", "geonameid", "isolanguage", "alternate_name",
+      "isPreferredName", "isShortName", "isColloquial", "isHistoric",
+      "from", "to"
+    ),
+    show_col_types = FALSE,
+    quote = ""
+  ) %>%
+    transmute(
+      geonameid = as.character(geonameid),
+      isolanguage = as.character(isolanguage),
+      alternate_name = as.character(alternate_name),
+      isPreferredName = suppressWarnings(as.integer(isPreferredName)),
+      isShortName = suppressWarnings(as.integer(isShortName)),
+      isColloquial = suppressWarnings(as.integer(isColloquial)),
+      isHistoric = suppressWarnings(as.integer(isHistoric))
+    )
+}
+
+read_uscities <- function(path) {
+  readr::read_csv(path, show_col_types = FALSE) %>%
+    transmute(
+      city = as.character(city),
+      city_ascii = as.character(city_ascii),
+      state_id = as.character(state_id),
+      state_name = as.character(state_name),
+      county_name = as.character(county_name),
+      lat = suppressWarnings(as.numeric(lat)),
+      lng = suppressWarnings(as.numeric(lng)),
+      population = suppressWarnings(as.numeric(population)),
+      timezone = as.character(timezone),
+      uscity_id = as.character(id)
+    )
+}
+```
+
+# Country aliases
+```{r}
+build_country_aliases <- function(countries) {
+  countries2 <- countries %>%
+    mutate(
+      country_name = as.character(Name),
+      iso2 = clean_code(Code)
+    )
+
+  bind_rows(
+    countries2 %>%
+      transmute(
+        match_type = "country",
+        canonical_name = country_name,
+        country_name = country_name,
+        state_name = NA_character_,
+        city_name = NA_character_,
+        geonameid = NA_character_,
+        city_key = NA_character_,
+        state_key = normalize_compact(country_name),
+        country_key = normalize_compact(country_name),
+        alias = country_name
+      ),
+    tibble(
+      match_type = "country",
+      canonical_name = c("United States", "United Kingdom", "Germany"),
+      country_name = c("United States", "United Kingdom", "Germany"),
+      state_name = NA_character_,
+      city_name = NA_character_,
+      geonameid = NA_character_,
+      city_key = NA_character_,
+      state_key = c("unitedstates", "unitedkingdom", "germany"),
+      country_key = c("unitedstates", "unitedkingdom", "germany"),
+      alias = c("usa", "england", "deutschland")
+    )
+  ) %>%
+    mutate(
+      alias_norm = normalize_text(alias),
+      alias_compact = normalize_compact(alias)
+    ) %>%
+    filter(alias_norm != "", !(alias_norm %in% bad_single_word_terms)) %>%
+    distinct(alias_norm, canonical_name, .keep_all = TRUE)
+}
+
+```
+
+# USA alias table
+
+```{r}
+build_us_state_aliases <- function(uscities) {
+  state_ref <- uscities %>%
+    distinct(state_name, state_id) %>%
+    filter(!is.na(state_name), state_name != "")
+
+  state_ref %>%
+    transmute(
+      match_type = "state",
+      canonical_name = state_name,
+      country_name = "United States",
+      state_name = state_name,
+      city_name = NA_character_,
+      geonameid = NA_character_,
+      city_key = NA_character_,
+      state_key = normalize_compact(paste(state_name, "United States")),
+      country_key = normalize_compact("United States"),
+      alias = state_name
+    ) %>%
+    mutate(
+      alias_norm = normalize_text(alias),
+      alias_compact = normalize_compact(alias)
+    ) %>%
+    filter(alias_norm != "", !(alias_norm %in% bad_single_word_terms)) %>%
+    distinct(alias_norm, canonical_name, .keep_all = TRUE)
+}
+```
+
+## global city master file
+```{r}
+build_global_city_master <- function(cities, countries, alt_names,
+                                     min_population = 5000) {
+
+  countries_small <- countries %>%
+    transmute(
+      country_code = clean_code(Code),
+      country_name = as.character(Name)
+    )
+
+  base <- cities %>%
+    mutate(
+      geonameid = as.character(geonameid),
+      name = as.character(name),
+      asciiname = as.character(asciiname),
+      country_code = clean_code(country_code),
+      admin1_code = clean_code(admin1_code),
+      feature_code = as.character(feature_code),
+      population = suppressWarnings(as.numeric(population)),
+      latitude = suppressWarnings(as.numeric(latitude)),
+      longitude = suppressWarnings(as.numeric(longitude))
+    ) %>%
+    filter(
+      feature_code %in% c("PPLC", "PPLA", "PPLA2", "PPLA3", "PPLA4", "PPL") |
+        (!is.na(population) & population >= min_population)
+    ) %>%
+    left_join(countries_small, by = "country_code") %>%
+    filter(!is.na(country_name), country_name != "") %>%
+    mutate(
+      city_name = coalesce(asciiname, name),
+      state_name = admin1_code,
+      city_key = normalize_compact(paste(city_name, state_name, country_name)),
+      state_key = normalize_compact(paste(state_name, country_name)),
+      country_key = normalize_compact(country_name)
+    ) %>%
+    select(
+      geonameid, city_name, state_name, country_name, country_code,
+      latitude, longitude, population, city_key, state_key, country_key,
+      name, asciiname
+    )
+
+  # Keep only alternate names for retained cities
+  alt_city <- alt_names %>%
+    filter(!is.na(alternate_name), alternate_name != "") %>%
+    semi_join(base %>% select(geonameid), by = "geonameid") %>%
+    filter(is.na(isHistoric) | isHistoric != 1L) %>%
+    filter(nchar(alternate_name) >= 2) %>%
+    transmute(geonameid, alias = alternate_name)
+
+  base_aliases <- bind_rows(
+    base %>% transmute(geonameid, alias = name),
+    base %>% transmute(geonameid, alias = asciiname),
+    alt_city
+  ) %>%
+    mutate(
+      alias_norm = normalize_text(alias),
+      alias_compact = normalize_compact(alias)
+    ) %>%
+    filter(
+      alias_norm != "",
+      !(alias_norm %in% bad_single_word_terms),
+      nchar(alias_norm) >= 2
+    ) %>%
+    distinct(geonameid, alias_norm, .keep_all = TRUE)
+
+  base %>%
+    inner_join(base_aliases, by = "geonameid")
+}
+
+```
+
+## USA city master file
+```{r}
+build_us_city_master <- function(uscities, min_population = 2000) {
+  bind_rows(
+    uscities %>%
+      mutate(population = suppressWarnings(as.numeric(population))) %>%
+      filter(!is.na(city_ascii), city_ascii != "") %>%
+      filter(is.na(population) | population >= min_population) %>%
+      transmute(
+        geonameid = paste0("uscity_", uscity_id),
+        city_name = city_ascii,
+        state_name = state_name,
+        country_name = "United States",
+        country_code = "US",
+        latitude = lat,
+        longitude = lng,
+        population = population,
+        city_key = normalize_compact(paste(city_ascii, state_name, "United States")),
+        state_key = normalize_compact(paste(state_name, "United States")),
+        country_key = normalize_compact("United States"),
+        alias = city
+      ),
+    uscities %>%
+      mutate(population = suppressWarnings(as.numeric(population))) %>%
+      filter(!is.na(city_ascii), city_ascii != "") %>%
+      filter(is.na(population) | population >= min_population) %>%
+      transmute(
+        geonameid = paste0("uscity_", uscity_id),
+        city_name = city_ascii,
+        state_name = state_name,
+        country_name = "United States",
+        country_code = "US",
+        latitude = lat,
+        longitude = lng,
+        population = population,
+        city_key = normalize_compact(paste(city_ascii, state_name, "United States")),
+        state_key = normalize_compact(paste(state_name, "United States")),
+        country_key = normalize_compact("United States"),
+        alias = city_ascii
+      )
+  ) %>%
+    mutate(
+      alias_norm = normalize_text(alias),
+      alias_compact = normalize_compact(alias)
+    ) %>%
+    filter(alias_norm != "", !(alias_norm %in% bad_single_word_terms)) %>%
+    distinct(geonameid, alias_norm, .keep_all = TRUE)
+}
+
+```
+
+## Airport alias (assigned to city, state, country for rollup)
+```{r}
+build_airport_aliases <- function(airports, uscities) {
+  airports_small <- airports %>%
+    transmute(
+      airport_id = as.character(id),
+      airport_name = as.character(name),
+      iata_code = clean_code(iata_code),
+      gps_code = clean_code(gps_code),
+      ident = clean_code(ident),
+      municipality = as.character(municipality),
+      iso_country = clean_code(iso_country),
+      iso_region = clean_code(iso_region)
+    )
+
+  us_lookup <- uscities %>%
+    transmute(
+      city_norm = normalize_text(city_ascii),
+      state_id = as.character(state_id),
+      state_name = as.character(state_name),
+      city_name = as.character(city_ascii),
+      country_name = "United States",
+      city_key = normalize_compact(paste(city_ascii, state_name, "United States")),
+      state_key = normalize_compact(paste(state_name, "United States")),
+      country_key = normalize_compact("United States")
+    ) %>%
+    distinct(city_norm, state_id, .keep_all = TRUE)
+
+  airport_city_xwalk <- airports_small %>%
+    mutate(
+      city_norm = normalize_text(municipality),
+      state_id = if_else(str_detect(iso_region, "-"),
+                         str_replace(iso_region, ".*-", ""),
+                         iso_region)
+    ) %>%
+    left_join(us_lookup, by = c("city_norm", "state_id")) %>%
+    filter(!is.na(city_key))
+
+  bind_rows(
+    airport_city_xwalk %>%
+      transmute(
+        match_type = "airport",
+        canonical_name = airport_name,
+        country_name, state_name, city_name,
+        geonameid = airport_id,
+        city_key, state_key, country_key,
+        alias = airport_name
+      ),
+    airport_city_xwalk %>%
+      filter(!is.na(iata_code)) %>%
+      transmute(
+        match_type = "airport_code",
+        canonical_name = airport_name,
+        country_name, state_name, city_name,
+        geonameid = airport_id,
+        city_key, state_key, country_key,
+        alias = iata_code
+      ),
+    airport_city_xwalk %>%
+      filter(!is.na(gps_code)) %>%
+      transmute(
+        match_type = "airport_code",
+        canonical_name = airport_name,
+        country_name, state_name, city_name,
+        geonameid = airport_id,
+        city_key, state_key, country_key,
+        alias = gps_code
+      ),
+    airport_city_xwalk %>%
+      filter(!is.na(ident)) %>%
+      transmute(
+        match_type = "airport_code",
+        canonical_name = airport_name,
+        country_name, state_name, city_name,
+        geonameid = airport_id,
+        city_key, state_key, country_key,
+        alias = ident
+      )
+  ) %>%
+    mutate(
+      alias_norm = normalize_text(alias),
+      alias_compact = normalize_compact(alias)
+    ) %>%
+    filter(alias_norm != "") %>%
+    distinct(match_type, alias_norm, city_key, .keep_all = TRUE)
+}
+
+```
+
+# All alias into one lookup
+```{r}
+
+build_place_alias_table <- function(
+  airports, cities, countries, alt_names, uscities,
+  min_global_city_population = 5000,
+  min_us_city_population = 2000
+) {
+  global_city_master <- build_global_city_master(
+    cities = cities,
+    countries = countries,
+    alt_names = alt_names,
+    min_population = min_global_city_population
+  )
+
+  us_city_master <- build_us_city_master(
+    uscities = uscities,
+    min_population = min_us_city_population
+  )
+
+  city_aliases <- bind_rows(
+    global_city_master %>%
+      transmute(
+        match_type = "city",
+        canonical_name = city_name,
+        country_name, state_name, city_name,
+        geonameid, city_key, state_key, country_key,
+        alias = alias_norm
+      ),
+    us_city_master %>%
+      transmute(
+        match_type = "city",
+        canonical_name = city_name,
+        country_name, state_name, city_name,
+        geonameid, city_key, state_key, country_key,
+        alias = alias_norm
+      )
+  ) %>%
+    mutate(
+      alias_norm = normalize_text(alias),
+      alias_compact = normalize_compact(alias)
+    ) %>%
+    distinct(alias_norm, city_key, .keep_all = TRUE)
+
+  state_aliases <- build_us_state_aliases(uscities)
+  country_aliases <- build_country_aliases(countries)
+  airport_aliases <- build_airport_aliases(airports, uscities)
+
+  alias_tbl <- bind_rows(
+    city_aliases,
+    state_aliases,
+    country_aliases,
+    airport_aliases
+  ) %>%
+    mutate(
+      n_words = str_count(alias_norm, "\\S+") + if_else(alias_norm == "", 0L, 0L)
+    ) %>%
+    filter(alias_norm != "", alias_compact != "") %>%
+    distinct(match_type, alias_norm, city_key, state_key, country_key, .keep_all = TRUE)
+
+  alias_tbl
+}
+```
+
+## Fast hash lookup
+```{r}
+build_geo_lookup_fast <- function(alias_tbl, max_phrase_words = 6L) {
+  alias_tbl <- alias_tbl %>%
+    mutate(
+      n_words = str_count(alias_norm, "\\S+") + 1L
+    )
+
+  exact_lookup <- split(alias_tbl, alias_tbl$alias_norm)
+  compact_lookup <- split(alias_tbl, alias_tbl$alias_compact)
+
+  phrase_sizes <- sort(unique(alias_tbl$n_words))
+  phrase_sizes <- phrase_sizes[phrase_sizes >= 1L & phrase_sizes <= max_phrase_words]
+
+  # named logical vectors for O(1)-ish membership tests
+  exact_keys <- stats::setNames(rep(TRUE, length(exact_lookup)), names(exact_lookup))
+  compact_keys <- stats::setNames(rep(TRUE, length(compact_lookup)), names(compact_lookup))
+
+  list(
+    exact_lookup = exact_lookup,
+    compact_lookup = compact_lookup,
+    exact_keys = exact_keys,
+    compact_keys = compact_keys,
+    phrase_sizes = phrase_sizes,
+    glue_words = glue_words
+  )
+}
+
+```
+
+Help function for phrase generation:
+```{r}
+make_ngrams <- function(tokens, k) {
+  n <- length(tokens)
+  if (n < k) return(character(0))
+  if (k == 1L) return(tokens)
+
+  starts <- seq_len(n - k + 1L)
+  vapply(
+    starts,
+    function(i) paste(tokens[i:(i + k - 1L)], collapse = " "),
+    character(1)
+  )
+}
+```
+
+# matcher
+```{r}
+
+extract_geo_tags_one_fast <- function(text_vec, lookup) {
+  text_vec <- text_vec[!is.na(text_vec)]
+  text_vec <- as.character(text_vec)
+  text_vec <- text_vec[nzchar(text_vec)]
+
+  if (length(text_vec) == 0) return("[]")
+
+  text_norm <- normalize_text(paste(text_vec, collapse = " "))
+  if (!nzchar(text_norm)) return("[]")
+
+  tokens <- unlist(str_split(text_norm, "\\s+"), use.names = FALSE)
+  tokens <- tokens[nzchar(tokens)]
+  if (length(tokens) == 0) return("[]")
+
+  hits <- vector("list", 0L)
+
+  # 1) exact phrase match with hashed membership checks
+  for (k in lookup$phrase_sizes) {
+    grams <- unique(make_ngrams(tokens, k))
+    if (length(grams) == 0) next
+
+    keep <- !is.na(lookup$exact_keys[grams])
+    if (any(keep)) {
+      matched <- grams[keep]
+      hits <- c(hits, lookup$exact_lookup[matched])
+    }
+  }
+
+  # 2) compact token matches like newyork / usa / atl
+  token_compact <- unique(normalize_compact(tokens))
+  token_compact <- token_compact[nzchar(token_compact)]
+
+  if (length(token_compact) > 0) {
+    keep_compact <- !is.na(lookup$compact_keys[token_compact])
+    if (any(keep_compact)) {
+      matched_compact <- token_compact[keep_compact]
+      hits <- c(hits, lookup$compact_lookup[matched_compact])
+    }
+  }
+
+  # 3) prefix/suffix glue stripping only
+  # catches sandiegolife, stockholmsunset, easyjetcrew, etc.
+  if (length(token_compact) > 0) {
+    stripped <- character(0)
+
+    for (tok in token_compact) {
+      tok_n <- nchar(tok)
+      for (glue in lookup$glue_words) {
+        glue_n <- nchar(glue)
+        if (tok_n <= glue_n) next
+
+        if (startsWith(tok, glue)) {
+          stripped <- c(stripped, substr(tok, glue_n + 1L, tok_n))
+        }
+        if (endsWith(tok, glue)) {
+          stripped <- c(stripped, substr(tok, 1L, tok_n - glue_n))
+        }
+      }
+    }
+
+    stripped <- unique(stripped[nzchar(stripped)])
+    if (length(stripped) > 0) {
+      keep_stripped <- !is.na(lookup$compact_keys[stripped])
+      if (any(keep_stripped)) {
+        matched_stripped <- stripped[keep_stripped]
+        hits <- c(hits, lookup$compact_lookup[matched_stripped])
+      }
+    }
+  }
+
+  if (length(hits) == 0) return("[]")
+
+  out <- bind_rows(hits) %>%
+    distinct(
+      match_type, canonical_name, country_name, state_name, city_name,
+      city_key, state_key, country_key, alias_norm,
+      .keep_all = TRUE
+    ) %>%
+    transmute(
+      matched_as = match_type,
+      matched_text = alias_norm,
+      canonical_name = canonical_name,
+      city = city_name,
+      state = state_name,
+      country = country_name,
+      city_key = city_key,
+      state_key = state_key,
+      country_key = country_key
+    ) %>%
+    arrange(country, state, city, canonical_name)
+
+  jsonlite::toJSON(out, auto_unbox = TRUE)
+}
+
+
+extract_geo_tags_df_fast <- function(df, lookup, text_cols, out_col = "geo_tag") {
+  stopifnot(all(text_cols %in% names(df)))
+
+  text_mat <- df[, text_cols, drop = FALSE]
+
+  df[[out_col]] <- vapply(
+    seq_len(nrow(text_mat)),
+    function(i) extract_geo_tags_one_fast(unlist(text_mat[i, ], use.names = FALSE), lookup),
+    character(1)
+  )
+
+  df
+}
+```
+
+# Config
+
+```{r}
+# geo files
+airports  <- read.csv("geo_datasets/airports.csv", stringsAsFactors = FALSE)
+airlines  <- read.csv("geo_datasets/airlines.csv", stringsAsFactors = FALSE)
+cities    <- read.csv("geo_datasets/cities.csv", stringsAsFactors = FALSE)
+countries <- read.csv("geo_datasets/countries.csv", stringsAsFactors = FALSE)
+alt_names <- read_alternate_names("geo_datasets/alternatenames.txt")
+uscities  <- read_uscities("geo_datasets/uscities.csv")
+
+```
+
+## Build alias table and lookup
+```{r}
+system.time({
+  alias_tbl <- build_place_alias_table(
+    airports = airports,
+    cities = cities,
+    countries = countries,
+    alt_names = alt_names,
+    uscities = uscities,
+    min_global_city_population = 10000,
+    min_us_city_population = 10000
+  )
+})
+
+system.time({
+  geo_lookup <- build_geo_lookup_fast(alias_tbl, max_phrase_words = 6L)
+})
+```
+
+```{r}
+# parameters
+TEXT_COLS <- c("title","caption","description", "hashtags","channel")
+
+```
+
+# run
+```{r}
+system.time({
+  tiktok <- extract_geo_tags_df_fast(
+    df = tiktok,
+    lookup = geo_lookup,
+    text_cols = TEXT_COLS,
+    out_col = "geo_tag"
+  )
+})
+```
+
+
+# Push data back to postgres
+
+```{r mongo-query}
+con <- dbConnect(
+  RPostgres::Postgres(),
+  host = Sys.getenv("DB_HOST"),
+  port = as.integer(Sys.getenv("DB_PORT", "5432")),
+  dbname = Sys.getenv("DB_NAME"),
+  user = Sys.getenv("DB_USER"),
+  password = Sys.getenv("DB_PASS"),
+  sslmode = "require" 
+)
+
+# sanity check
+dbGetQuery(con, "select now() as now_utc;")
+```
+
+``` {r}
+schema_name <- "clean_data"
+table_name  <- "tik_tok"    
+
+
+# OVERWRITE table
+dbWriteTable(
+  con,
+  Id(schema = schema_name, table = table_name),
+  tiktok,
+  overwrite = TRUE
+)
+
+# verify
+dbGetQuery(con, sprintf("SELECT COUNT(*) AS n FROM %s.%s", schema_name, table_name))
+```
+
+```{r}
+# close connection
+dbDisconnect(con)
+```
